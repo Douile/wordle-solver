@@ -237,49 +237,80 @@ fn main() -> std::io::Result<()> {
 
         for c in line.chars() {
             if c >= 'a' && c <= 'z' {
-                rules.insert(c, Rule::Banned);
+                game.add_rule(c, PrimativeRule::Banned);
             }
         }
 
-        eprintln!("Parsed rules: {:?}", rules);
+        eprintln!("Parsed rules: {:?}", game.rules);
 
-        let must_use_chars: Vec<(&char, Option<&HashSet<usize>>)> = rules
-            .iter()
-            .filter_map(|(c, v)| match v {
-                Rule::Unfound(_) => Some((c, None)),
-                Rule::Found(pos, _) => Some((c, Some(pos))),
-                _ => None,
-            })
-            .collect();
+        game = game.prune_wordlist();
 
-        words = words
-            .into_iter()
-            .filter(|word| {
-                let will_keep = word.char_indices().all(|(i, c)| match rules.get(&c) {
-                    Some(Rule::Unfound(pos)) | Some(Rule::Found(_, pos)) => !pos.contains(&i),
-                    Some(Rule::Banned) => false,
-                    None => true,
-                }) && must_use_chars.iter().all(|(c, pos)| {
-                    if let Some(pos) = pos {
-                        let chars: Vec<char> = word.chars().collect();
-                        pos.iter().all(|i| chars[*i] == **c)
-                    } else {
-                        word.chars().any(|ch| ch == **c)
-                    }
-                });
-
-                if !will_keep {
-                    for c in word.chars() {
-                        char_counts[c as usize - A_OFFSET] -= 1;
-                    }
-                }
-
-                will_keep
-            })
-            .collect();
-
-        print_best_words(sort_and_find_best_words(&words, &char_counts).iter());
+        print_best_words(game.calculate_sorted_word_scores().iter());
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, io::BufReader};
+
+    use crate::*;
+
+    #[test]
+    fn test_all_words() -> std::io::Result<()> {
+        let wordlist = fs::OpenOptions::new()
+            .read(true)
+            .open("./wordle-wordlist.txt")?;
+        let mut reader = BufReader::new(wordlist);
+        let (words, char_counts) = read_words(&mut reader);
+        drop(reader);
+
+        let mut guess_counts: BTreeMap<u32, u32> = BTreeMap::new();
+        let mut total_guesses: u32 = 0;
+
+        for word in words.iter() {
+            let word_chars: Vec<char> = word.chars().collect();
+            let mut game = Wordle::new(words.clone(), char_counts.clone());
+
+            let mut guess = game.calculate_sorted_word_scores()[0].0.clone();
+            let mut prev_guesses = vec![guess.clone()];
+
+            let mut guesses = 1;
+            while guess.ne(word) {
+                if guesses > 6 {
+                    eprintln!(
+                        "Failed guessing for {:?}\nguesses {:?}\nstate {:?}",
+                        word, prev_guesses, game
+                    );
+                    break;
+                }
+
+                for (i, c) in guess.char_indices() {
+                    if word_chars[i] == c {
+                        game.add_rule(c, PrimativeRule::Found(i));
+                    } else if word_chars.contains(&c) {
+                        game.add_rule(c, PrimativeRule::Unfound(i));
+                    } else {
+                        game.add_rule(c, PrimativeRule::Banned);
+                    }
+                }
+
+                game = game.prune_wordlist();
+
+                guess = game.calculate_sorted_word_scores()[0].0.clone();
+                prev_guesses.push(guess.clone());
+                guesses += 1;
+                total_guesses += 1;
+            }
+
+            guess_counts.insert(guesses, guess_counts.get(&guesses).unwrap_or(&0) + 1);
+        }
+        println!("Guess counts {:?}", guess_counts);
+        let average =
+            guess_counts.iter().fold(0, |acc, (k, v)| acc + (k * v)) as f64 / total_guesses as f64;
+        println!("Average guesses {}", average);
+
+        Ok(())
+    }
 }
