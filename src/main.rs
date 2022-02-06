@@ -26,13 +26,141 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{stdin, stdout, BufRead, BufReader, Write};
 
+type CharCount = [u64; 26];
+type WordScores<'a> = Vec<(&'a String, u64)>;
+
+#[derive(Debug)]
+struct Wordle {
+    words: Vec<String>,
+    char_counts: CharCount,
+    rules: HashMap<char, Rule>,
+}
+
+impl Wordle {
+    fn new(words: Vec<String>, char_counts: CharCount) -> Self {
+        Self {
+            words,
+            char_counts,
+            rules: HashMap::new(),
+        }
+    }
+
+    fn calculate_word_scores(&self) -> WordScores {
+        self.words
+            .iter()
+            .map(|word| {
+                let mut used: [bool; 26] = [false; 26];
+                (
+                    word,
+                    word.chars().fold(0, |acc, c| {
+                        if c >= 'a' && c <= 'z' {
+                            let i = c as usize - 'a' as usize;
+                            if used[i] {
+                                acc
+                            } else {
+                                used[i] = true;
+                                acc + self.char_counts[i]
+                            }
+                        } else {
+                            acc
+                        }
+                    }),
+                )
+            })
+            .collect()
+    }
+
+    fn sort_word_scores(scores: &mut WordScores) {
+        scores.sort_by(|a, b| b.1.cmp(&a.1));
+    }
+
+    fn calculate_sorted_word_scores(&self) -> WordScores {
+        let mut word_scores = self.calculate_word_scores();
+        Self::sort_word_scores(&mut word_scores);
+        word_scores
+    }
+
+    fn add_rule(&mut self, character: char, rule_to_add: PrimativeRule) {
+        match rule_to_add {
+            PrimativeRule::Unfound(pos) => {
+                if let Some(Rule::Unfound(set)) = self.rules.get_mut(&character) {
+                    set.insert(pos);
+                } else {
+                    self.rules.insert(character, Rule::Unfound([pos].into()));
+                }
+            }
+            PrimativeRule::Found(pos) => {
+                let old_rule = self.rules.remove(&character);
+                let new_rule = match old_rule {
+                    Some(Rule::Found(mut is_pos, not_pos)) => {
+                        is_pos.insert(pos);
+                        Rule::Found(is_pos, not_pos)
+                    }
+                    Some(Rule::Unfound(not_pos)) => Rule::Found([pos].into(), not_pos),
+                    _ => Rule::Found([pos].into(), HashSet::new()),
+                };
+                self.rules.insert(character, new_rule);
+            }
+            PrimativeRule::Banned => {
+                self.rules.insert(character, Rule::Banned);
+            }
+        };
+    }
+
+    fn prune_wordlist(mut self) -> Self {
+        let must_use_chars: Vec<(&char, Option<&HashSet<usize>>)> = self
+            .rules
+            .iter()
+            .filter_map(|(c, v)| match v {
+                Rule::Unfound(_) => Some((c, None)),
+                Rule::Found(pos, _) => Some((c, Some(pos))),
+                _ => None,
+            })
+            .collect();
+
+        self.words = self
+            .words
+            .into_iter()
+            .filter(|word| {
+                let will_keep = word.char_indices().all(|(i, c)| match self.rules.get(&c) {
+                    Some(Rule::Unfound(pos)) | Some(Rule::Found(_, pos)) => !pos.contains(&i),
+                    Some(Rule::Banned) => false,
+                    None => true,
+                }) && must_use_chars.iter().all(|(c, pos)| {
+                    if let Some(pos) = pos {
+                        let chars: Vec<char> = word.chars().collect();
+                        pos.iter().all(|i| chars[*i] == **c)
+                    } else {
+                        word.chars().any(|ch| ch == **c)
+                    }
+                });
+
+                if !will_keep {
+                    for c in word.chars() {
+                        self.char_counts[c as usize - A_OFFSET] -= 1;
+                    }
+                }
+
+                will_keep
+            })
+            .collect();
+        self
+    }
+}
+
 #[derive(Debug)]
 enum Rule {
     Found(HashSet<usize>, HashSet<usize>),
     Unfound(HashSet<usize>),
     Banned,
 }
-type CharCount = [u64; 26];
+
+#[derive(Debug)]
+enum PrimativeRule {
+    Found(usize),
+    Unfound(usize),
+    Banned,
+}
 
 const A_OFFSET: usize = 'a' as usize;
 
@@ -55,37 +183,6 @@ fn read_words<T: BufRead>(file: &mut T) -> (Vec<String>, CharCount) {
     (words, char_counts)
 }
 
-fn sort_and_find_best_words<'a>(
-    wordlist: &'a Vec<String>,
-    char_counts: &CharCount,
-) -> Vec<(&'a String, u64)> {
-    let mut words_with_scores: Vec<(&String, u64)> = wordlist
-        .iter()
-        .map(|word| {
-            let mut used: [bool; 26] = [false; 26];
-            (
-                word,
-                word.chars().fold(0, |acc, c| {
-                    if c >= 'a' && c <= 'z' {
-                        let i = c as usize - 'a' as usize;
-                        if used[i] {
-                            acc
-                        } else {
-                            used[i] = true;
-                            acc + char_counts[i]
-                        }
-                    } else {
-                        acc
-                    }
-                }),
-            )
-        })
-        .collect();
-    words_with_scores.sort_by(|a, b| b.1.cmp(&a.1));
-
-    words_with_scores
-}
-
 fn print_best_words<'a, T: Iterator<Item = &'a (&'a String, u64)>>(mut sorted_words: T) {
     println!("\x1b[32;1mBest words\x1b[0m");
     if let Some((first_word, best_score)) = sorted_words.next() {
@@ -98,19 +195,19 @@ fn print_best_words<'a, T: Iterator<Item = &'a (&'a String, u64)>>(mut sorted_wo
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::io::Result<()> {
     let wordlist = fs::OpenOptions::new()
         .read(true)
         .open(std::env::args().next_back().unwrap())?;
     let mut reader = BufReader::new(wordlist);
 
-    let (mut words, mut char_counts) = read_words(&mut reader);
+    let (words, char_counts) = read_words(&mut reader);
+    drop(reader);
 
-    let words_with_scores = sort_and_find_best_words(&words, &char_counts);
+    let mut game = Wordle::new(words, char_counts);
 
-    print_best_words(words_with_scores.iter());
+    print_best_words(game.calculate_sorted_word_scores().iter());
 
-    let mut rules: HashMap<char, Rule> = HashMap::new();
     let mut o = stdout();
     let mut line = String::new();
     loop {
@@ -126,19 +223,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         for (index, c) in line.char_indices() {
             if c >= 'a' && c <= 'z' {
-                if let Some(Rule::Unfound(set)) = rules.get_mut(&c) {
-                    set.insert(index);
-                } else {
-                    rules.insert(c, Rule::Unfound([index].into()));
-                }
+                game.add_rule(c, PrimativeRule::Unfound(index));
             } else if c >= 'A' && c <= 'Z' {
-                let c = c.to_ascii_lowercase();
-                let not_pos = if let Some(Rule::Unfound(pos)) = rules.remove(&c) {
-                    pos
-                } else {
-                    HashSet::new()
-                };
-                rules.insert(c, Rule::Found([index].into(), not_pos));
+                game.add_rule(c.to_ascii_lowercase(), PrimativeRule::Found(index));
             }
         }
 
