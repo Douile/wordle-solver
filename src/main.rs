@@ -28,7 +28,7 @@ use std::io::{stdin, stdout, BufRead, BufReader, Write};
 
 #[derive(Debug)]
 enum Rule {
-    Found(usize),
+    Found(HashSet<usize>, HashSet<usize>),
     Unfound(HashSet<usize>),
     Banned,
 }
@@ -129,12 +129,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(Rule::Unfound(set)) = rules.get_mut(&c) {
                     set.insert(index);
                 } else {
-                    let mut set = HashSet::new();
-                    set.insert(index);
-                    rules.insert(c, Rule::Unfound(set));
+                    rules.insert(c, Rule::Unfound([index].into()));
                 }
             } else if c >= 'A' && c <= 'Z' {
-                rules.insert(c.to_ascii_lowercase(), Rule::Found(index));
+                let c = c.to_ascii_lowercase();
+                let not_pos = if let Some(Rule::Unfound(pos)) = rules.remove(&c) {
+                    pos
+                } else {
+                    HashSet::new()
+                };
+                rules.insert(c, Rule::Found([index].into(), not_pos));
             }
         }
 
@@ -152,10 +156,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         eprintln!("Parsed rules: {:?}", rules);
 
-        let must_use_chars: Vec<&char> = rules
+        let must_use_chars: Vec<(&char, Option<&HashSet<usize>>)> = rules
             .iter()
             .filter_map(|(c, v)| match v {
-                Rule::Unfound(_) | Rule::Found(_) => Some(c),
+                Rule::Unfound(_) => Some((c, None)),
+                Rule::Found(pos, _) => Some((c, Some(pos))),
                 _ => None,
             })
             .collect();
@@ -164,13 +169,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .into_iter()
             .filter(|word| {
                 let will_keep = word.char_indices().all(|(i, c)| match rules.get(&c) {
-                    Some(Rule::Unfound(pos)) => !pos.contains(&i),
-                    Some(Rule::Found(pos)) => i == *pos,
+                    Some(Rule::Unfound(pos)) | Some(Rule::Found(_, pos)) => !pos.contains(&i),
                     Some(Rule::Banned) => false,
                     None => true,
-                }) && must_use_chars
-                    .iter()
-                    .all(|c| word.chars().any(|ch| ch == **c));
+                }) && must_use_chars.iter().all(|(c, pos)| {
+                    if let Some(pos) = pos {
+                        let chars: Vec<char> = word.chars().collect();
+                        pos.iter().all(|i| chars[*i] == **c)
+                    } else {
+                        word.chars().any(|ch| ch == **c)
+                    }
+                });
 
                 if !will_keep {
                     for c in word.chars() {
