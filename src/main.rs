@@ -253,7 +253,11 @@ fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, io::BufReader};
+    use std::{
+        collections::BTreeMap,
+        io::BufReader,
+        time::{Duration, Instant},
+    };
 
     use crate::*;
 
@@ -268,6 +272,10 @@ mod tests {
 
         let mut guess_counts: BTreeMap<u32, u32> = BTreeMap::new();
         let mut total_guesses: u32 = 0;
+
+        let mut total_add_rules = Duration::ZERO;
+        let mut total_prune_wordlist = Duration::ZERO;
+        let mut total_calculate_scores = Duration::ZERO;
 
         for word in words.iter() {
             let word_chars: Vec<char> = word.chars().collect();
@@ -286,6 +294,7 @@ mod tests {
                     break;
                 }
 
+                let add_rules = Instant::now();
                 for (i, c) in guess.char_indices() {
                     if word_chars[i] == c {
                         game.add_rule(c, PrimativeRule::Found(i));
@@ -296,9 +305,25 @@ mod tests {
                     }
                 }
 
+                let prune_wordlist = Instant::now();
+
                 game = game.prune_wordlist();
 
-                guess = game.calculate_sorted_word_scores()[0].0.clone();
+                let calculate_scores = Instant::now();
+
+                guess = game
+                    .calculate_sorted_word_scores()
+                    .first()
+                    .unwrap()
+                    .0
+                    .clone();
+
+                let done = Instant::now();
+
+                total_add_rules += prune_wordlist.duration_since(add_rules);
+                total_prune_wordlist += calculate_scores.duration_since(prune_wordlist);
+                total_calculate_scores += done.duration_since(calculate_scores);
+
                 prev_guesses.push(guess.clone());
                 guesses += 1;
                 total_guesses += 1;
@@ -306,10 +331,27 @@ mod tests {
 
             guess_counts.insert(guesses, guess_counts.get(&guesses).unwrap_or(&0) + 1);
         }
+        println!("Total guesses {}", total_guesses);
         println!("Guess counts {:?}", guess_counts);
-        let average =
-            guess_counts.iter().fold(0, |acc, (k, v)| acc + (k * v)) as f64 / total_guesses as f64;
+        let average: f64 =
+            guess_counts.iter().fold(0, |acc, (k, v)| acc + (*v * *k)) as f64 / words.len() as f64;
         println!("Average guesses {}", average);
+
+        println!(
+            "Time spent adding rules {:?} (average {:?})",
+            total_add_rules,
+            total_add_rules / total_guesses
+        );
+        println!(
+            "Time spent pruning wordlist {:?} (average {:?})",
+            total_prune_wordlist,
+            total_prune_wordlist / total_guesses
+        );
+        println!(
+            "Time spent calculating guess {:?} (average {:?})",
+            total_calculate_scores,
+            total_calculate_scores / total_guesses
+        );
 
         Ok(())
     }
