@@ -26,7 +26,10 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{stdin, stdout, BufRead, BufReader, Write};
 
-type CharCount = [u64; 26];
+const A_OFFSET: usize = 'a' as usize;
+const WORD_LEN: usize = 5;
+
+type CharCount = [(u64, [u64; WORD_LEN]); 26];
 type WordScores<'a> = Vec<(&'a String, u64)>;
 
 #[derive(Debug)]
@@ -52,14 +55,15 @@ impl Wordle {
                 let mut used: [bool; 26] = [false; 26];
                 (
                     word,
-                    word.chars().fold(0, |acc, c| {
+                    word.char_indices().fold(0, |acc, (index, c)| {
                         if c >= 'a' && c <= 'z' {
                             let i = c as usize - 'a' as usize;
+                            let score = self.char_counts[i].0 + self.char_counts[i].1[index];
                             if used[i] {
-                                acc
+                                acc + score / 2
                             } else {
                                 used[i] = true;
-                                acc + self.char_counts[i]
+                                acc + score
                             }
                         } else {
                             acc
@@ -97,12 +101,33 @@ impl Wordle {
                         Rule::Found(is_pos, not_pos)
                     }
                     Some(Rule::Unfound(not_pos)) => Rule::Found([pos].into(), not_pos),
+                    Some(Rule::Banned) => {
+                        let mut not_pos = HashSet::new();
+                        for i in 0..WORD_LEN {
+                            if i != pos {
+                                not_pos.insert(i);
+                            }
+                        }
+                        Rule::Found([pos].into(), not_pos)
+                    }
                     _ => Rule::Found([pos].into(), HashSet::new()),
                 };
                 self.rules.insert(character, new_rule);
             }
             PrimativeRule::Banned => {
-                self.rules.insert(character, Rule::Banned);
+                let old_rule = self.rules.remove(&character);
+                let new_rule = match old_rule {
+                    Some(Rule::Found(is_pos, mut not_pos)) => {
+                        for i in 0..WORD_LEN {
+                            if !is_pos.contains(&i) {
+                                not_pos.insert(i);
+                            }
+                        }
+                        Rule::Found(is_pos, not_pos)
+                    }
+                    _ => Rule::Banned,
+                };
+                self.rules.insert(character, new_rule);
             }
         };
     }
@@ -136,8 +161,10 @@ impl Wordle {
                 });
 
                 if !will_keep {
-                    for c in word.chars() {
-                        self.char_counts[c as usize - A_OFFSET] -= 1;
+                    for (i, c) in word.char_indices() {
+                        let p = c as usize - A_OFFSET;
+                        self.char_counts[p].0 -= 1;
+                        self.char_counts[p].1[i] -= 1;
                     }
                 }
 
@@ -162,18 +189,18 @@ enum PrimativeRule {
     Banned,
 }
 
-const A_OFFSET: usize = 'a' as usize;
-
 fn read_words<T: BufRead>(file: &mut T) -> (Vec<String>, CharCount) {
     let mut words = Vec::new();
-    let mut char_counts = [0; 26];
+    let mut char_counts = [(0, [0, 0, 0, 0, 0]); 26];
 
     let mut line = String::new();
     while let Ok(6) = file.read_line(&mut line) {
         let l = line.trim().to_string();
-        for c in l.chars() {
+        for (i, c) in l.char_indices() {
             if c >= 'a' && c <= 'z' {
-                char_counts[c as usize - A_OFFSET] += 1;
+                let p = c as usize - A_OFFSET;
+                char_counts[p].0 += 1;
+                char_counts[p].1[i] += 1;
             }
         }
         words.push(l);
